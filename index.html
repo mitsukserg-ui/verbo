@@ -640,6 +640,9 @@ function renderHome() {
   const cur = levels[lvl - 1], nxt = levels[lvl];
   const openNow = openSteps(pr.learned);
   const finished = pr.learned >= total;
+  const saved = loadLesson();
+  let savedDone = 0, savedTotal = 0;
+  if (saved) saved.stages.forEach((st, k) => { savedTotal += st.tasks.length; if (k < saved.s) savedDone += st.tasks.length; else if (k === saved.s) savedDone += saved.t; });
   $app.innerHTML = `
     <div class="brand"><h1>Verbo<span>·</span>a<span>·</span>Verbo</h1><span class="tag">день ${pr.days + (doneToday ? 0 : 1)}</span></div>
     ${STANDALONE ? `<div class="row" style="align-items:center"><span class="cue" style="flex:1 1 auto">👤 ${esc(nick)}</span><button class="linkish" id="switch-user" style="flex:0 0 auto">Змінити користувача</button></div>` : ''}
@@ -663,10 +666,12 @@ function renderHome() {
     ${finished ? `<div class="panel done-note"><b>Усі ${total} ${M().many} вивчено!</b><br>Можна повторювати щодня.</div>` :
       doneToday ? `<div class="panel done-note"><b>Урок на сьогодні пройдено ✓</b><br><span class="sub">Завтра — нові ${PER_DAY} ${M().many} і повторення.</span></div>` : ''}
     <div style="display:grid;gap:8px">
-      ${!doneToday && !finished ? `<button class="cta" id="start">Почати урок · ${PER_DAY} нових ${M().many}</button>` : ''}
+      ${saved ? `<button class="cta" id="resume">Продовжити урок · ${savedDone}/${savedTotal}</button>
+        <div class="cue" style="text-align:center">Урок зараховується, коли пройдено і нові слова, і повторення всіх вивчених. <button class="linkish" id="restart">Почати спочатку</button></div>` :
+        !doneToday && !finished ? `<button class="cta" id="start">Почати урок · ${PER_DAY} нових ${M().many}${pr.learned ? ` + повторення ${pr.learned}` : ''}</button>` : ''}
       <div class="row">
         ${pr.learned ? `<button class="cta ghost" id="review">Повторити все (${pr.learned})</button>` : ''}
-        ${doneToday && !finished ? `<button class="cta ghost" id="extra">Ще ${PER_DAY} нових слів</button>` : ''}
+        ${doneToday && !finished && !saved ? `<button class="cta ghost" id="extra">Ще ${PER_DAY} нових слів</button>` : ''}
       </div>
       ${mode === 'verbs' && openNow.length > 1 ? `<label class="toggle"><input type="checkbox" id="full" ${state.full ? 'checked' : ''}><span>Усі особи в кожному відкритому часі. Без цього новий час — усі особи, а попередні — по одній випадковій особі.</span></label>` : ''}
     </div>
@@ -684,12 +689,14 @@ function renderHome() {
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
     renderHome();
   });
-  on('start', () => startLesson({ withReview: true }));
-  on('extra', () => startLesson({ withReview: false }));
+  on('start', () => startLesson());
+  on('extra', () => startLesson());
+  on('resume', () => { lesson = saved; renderTask(); });
+  on('restart', () => { clearLesson(); startLesson(); });
   on('review', () => startReview());
   on('reset', () => { document.getElementById('confirm').hidden = false; });
   on('reset-no', () => { document.getElementById('confirm').hidden = true; });
-  on('reset-yes', async () => { state[mode] = blank(); await save(); renderHome(); });
+  on('reset-yes', async () => { clearLesson(); state[mode] = blank(); await save(); renderHome(); });
   const full = document.getElementById('full');
   if (full) full.onchange = () => { state.full = full.checked; save(); };
   if (STANDALONE) {
@@ -773,20 +780,32 @@ function nounStages(newIdx) {
   if (un.length) stages.push({ name: 'Неозначений артикль · un / una', tasks: shuffle(un.flatMap(i => NOUNS[i].unos ? [{ type: 'form', i, f: 'un' }, { type: 'form', i, f: 'unos' }] : [{ type: 'form', i, f: 'un' }])) });
   return stages;
 }
-function buildLesson(withReview) {
+// Every lesson (the daily one and any extra one) ends with all earlier words as multiple choice.
+function buildLesson() {
   const start = P().learned, end = Math.min(N(), start + PER_DAY);
   const newIdx = []; for (let i = start; i < end; i++) newIdx.push(i);
   const stages = [];
   stages.push({ name: `Нові ${mode === 'verbs' ? 'дієслова' : 'іменники'} · обери переклад`, tasks: newIdx.map(mcTask) });
   stages.push({ name: mode === 'verbs' ? 'Напиши іспанською' : 'Напиши іспанською з артиклем', tasks: shuffle(newIdx).map(i => ({ type: 'spell', i })) });
   stages.push(...(mode === 'verbs' ? verbStages(newIdx) : nounStages(newIdx)));
-  if (withReview && start > 0) {
+  if (start > 0) {
     const old = []; for (let i = 0; i < start; i++) old.push(i);
-    stages.push({ name: 'Повторення попередніх слів', tasks: shuffle(old).map(mcTask) });
+    stages.push({ name: `Повторення всіх вивчених слів (${start})`, tasks: shuffle(old).map(mcTask) });
   }
-  return { stages, newIdx, end, commit: true, withReview };
+  return { stages, newIdx, start, end, commit: true, mode };
 }
-function startLesson({ withReview }) { lesson = buildLesson(withReview); lesson.s = 0; lesson.t = 0; renderTask(); }
+function startLesson() { lesson = buildLesson(); lesson.s = 0; lesson.t = 0; saveLesson(); renderTask(); }
+
+// The lesson in progress is kept per profile and section, so closing the app mid-review loses nothing.
+const lessonKey = () => LS_KEY + ':lesson:' + mode;
+function saveLesson() { if (lesson && lesson.commit) try { localStorage.setItem(lessonKey(), JSON.stringify(lesson)); } catch (e) {} }
+function clearLesson() { try { localStorage.removeItem(lessonKey()); } catch (e) {} }
+function loadLesson() {
+  try {
+    const l = JSON.parse(localStorage.getItem(lessonKey()));
+    return l && l.mode === mode && l.start === P().learned && l.stages && l.s < l.stages.length ? l : null;
+  } catch (e) { return null; }
+}
 function startReview() {
   const all = []; for (let i = 0; i < P().learned; i++) all.push(i);
   lesson = { stages: [{ name: 'Повторення', tasks: shuffle(all).map(mcTask) }], commit: false, s: 0, t: 0 };
@@ -807,6 +826,7 @@ function next() {
   lesson.t++;
   if (lesson.t >= lesson.stages[lesson.s].tasks.length) { lesson.s++; lesson.t = 0; }
   if (lesson.s >= lesson.stages.length) return finishLesson();
+  saveLesson();
   renderTask();
 }
 function bindQuit() { document.getElementById('quit').onclick = () => { lesson = null; renderHome(); }; }
@@ -919,6 +939,7 @@ async function finishLesson() {
   let learnedNow = 0;
   const before = pr.learned;
   if (wasLesson) {
+    clearLesson();
     learnedNow = lesson.end - pr.learned;
     pr.learned = lesson.end;
     if (pr.lastDate !== today()) { pr.days++; pr.lastDate = today(); }
