@@ -121,6 +121,13 @@ h1, h2, .es { font-family: var(--display); text-wrap: balance; }
 .opt:active { transform: scale(.98); }
 .opt.ok { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
 .opt.bad { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+.forms { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 8px; }
+.forms .ft { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+.forms .fg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.forms .fc { display: grid; gap: 1px; min-width: 0; }
+.forms .fc span { font-size: 12px; color: var(--muted); }
+.forms .fc b { font-family: var(--display); font-size: 18px; overflow-wrap: anywhere; }
+.toast { text-align: center; padding: 10px 12px; border-radius: var(--radius); background: var(--ok-bg); color: var(--ok); font-weight: 700; }
 .typing { display: grid; gap: 10px; }
 .inp { width: 100%; box-sizing: border-box; font-family: var(--display); font-size: 26px; text-align: center; padding: 14px; border-radius: var(--radius); border: 2px solid var(--line); background: var(--surface); color: var(--ink); }
 .inp.ok { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); }
@@ -517,7 +524,7 @@ function useProfile(name) {
 }
 
 function normalize(s) {
-  const out = { mode: 'verbs', verbs: blank(), nouns: blank(), full: false, updated: 0, ...s };
+  const out = { mode: 'verbs', verbs: blank(), nouns: blank(), full: false, sound: true, updated: 0, ...s };
   if (!s.verbs && typeof s.learned === 'number') out.verbs = { learned: s.learned, lastDate: s.lastDate || '', days: s.days || 0 };
   delete out.learned; delete out.lastDate; delete out.days;
   if (!MODES[out.mode]) out.mode = 'verbs';
@@ -566,6 +573,28 @@ function speak(text) {
   } catch (e) {}
 }
 const buzz = () => { try { navigator.vibrate && navigator.vibrate(120); } catch (e) {} };
+
+// Sounds are synthesized with Web Audio, so the app needs no audio files and works offline.
+let audioCtx = null;
+function tone(notes) {
+  if (state.sound === false) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0 = audioCtx.currentTime + 0.02;
+    for (const [freq, start, dur, type = 'sine', vol = 0.2] of notes) {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t0 + start);
+      g.gain.exponentialRampToValueAtTime(vol, t0 + start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + start + dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0 + start); o.stop(t0 + start + dur + 0.05);
+    }
+  } catch (e) {}
+}
+const soundOk = () => tone([[880, 0, 0.12], [1318.5, 0.09, 0.22]]);
+const soundFanfare = () => tone([[523.25, 0, 0.2, 'triangle'], [659.25, 0.15, 0.2, 'triangle'], [783.99, 0.3, 0.2, 'triangle'], [1046.5, 0.45, 0.6, 'triangle', 0.25], [1318.5, 0.45, 0.6, 'sine', 0.12]]);
 const wrLink = v => 'https://www.wordreference.com/conj/esverbs.aspx?v=' + encodeURIComponent(v);
 const wrTrans = v => 'https://www.wordreference.com/es/en/translation.asp?spen=' + encodeURIComponent(v);
 const pronLabel = (tk, k) => tk === 'im' ? PRON_IMP[k] : PRONOUNS[k];
@@ -673,6 +702,7 @@ function renderHome() {
         ${pr.learned ? `<button class="cta ghost" id="review">Повторити все (${pr.learned})</button>` : ''}
         ${doneToday && !finished && !saved ? `<button class="cta ghost" id="extra">Ще ${PER_DAY} нових слів</button>` : ''}
       </div>
+      <label class="toggle"><input type="checkbox" id="sound" ${state.sound !== false ? 'checked' : ''}><span>Звукові сигнали (на iPhone чути, коли вимкнено беззвучний режим)</span></label>
       ${mode === 'verbs' && openNow.length > 1 ? `<label class="toggle"><input type="checkbox" id="full" ${state.full ? 'checked' : ''}><span>Усі особи в кожному відкритому часі. Без цього новий час — усі особи, а попередні — по одній випадковій особі.</span></label>` : ''}
     </div>
     ${pr.learned ? `<h2 style="margin:8px 0 0;font-size:20px">Мій словник · ${M().label.toLowerCase()}</h2><div class="dict" id="dict"></div>` : ''}
@@ -699,6 +729,8 @@ function renderHome() {
   on('reset-yes', async () => { clearLesson(); state[mode] = blank(); await save(); renderHome(); });
   const full = document.getElementById('full');
   if (full) full.onchange = () => { state.full = full.checked; save(); };
+  const snd = document.getElementById('sound');
+  snd.onchange = () => { state.sound = snd.checked; save(); soundOk(); };
   if (STANDALONE) {
     on('switch-user', () => { try { localStorage.removeItem(CURRENT_KEY); } catch (e) {} renderLogin(); });
     bindBackup();
@@ -790,7 +822,7 @@ function buildLesson() {
   stages.push(...(mode === 'verbs' ? verbStages(newIdx) : nounStages(newIdx)));
   if (start > 0) {
     const old = []; for (let i = 0; i < start; i++) old.push(i);
-    stages.push({ name: `Повторення всіх вивчених слів (${start})`, tasks: shuffle(old).map(mcTask) });
+    stages.push({ name: `Повторення всіх вивчених слів (${start})`, review: true, tasks: shuffle(old).map(mcTask) });
   }
   return { stages, newIdx, start, end, commit: true, mode };
 }
@@ -819,12 +851,21 @@ function progressInfo() {
 }
 function header() {
   const { total, done } = progressInfo();
+  const toast = lesson.toast ? `<div class="toast" role="status">${lesson.toast}</div>` : '';
+  lesson.toast = '';
   return `<div class="top"><button class="x" id="quit" aria-label="Вийти">✕</button><div class="bar"><i style="width:${done / total * 100}%"></i></div><span class="count">${done}/${total}</span></div>
-    <div class="stage">${lesson.stages[lesson.s].name}</div>`;
+    ${toast}<div class="stage">${lesson.stages[lesson.s].name}</div>`;
 }
 function next() {
   lesson.t++;
-  if (lesson.t >= lesson.stages[lesson.s].tasks.length) { lesson.s++; lesson.t = 0; }
+  if (lesson.t >= lesson.stages[lesson.s].tasks.length) {
+    lesson.s++; lesson.t = 0;
+    // The day's new words are done once the lesson reaches the review of earlier words.
+    if (lesson.commit && lesson.stages[lesson.s] && lesson.stages[lesson.s].review) {
+      soundFanfare();
+      lesson.toast = `🎉 ${lesson.end - lesson.start} нових слів пройдено! Тепер повторення.`;
+    }
+  }
   if (lesson.s >= lesson.stages.length) return finishLesson();
   saveLesson();
   renderTask();
@@ -843,6 +884,18 @@ function distractors(i) {
   for (const k of pool) { const u = list[k].ua; if (!seen.has(u)) { seen.add(u); out.push(u); } if (out.length === 3) break; }
   return out;
 }
+// All forms of the word, shown under it after the right translation is picked.
+function formsHtml(v) {
+  const cell = (label, form) => `<div class="fc"><span>${label}</span><b>${esc(show(form))}</b></div>`;
+  if (mode === 'nouns') {
+    return `<div class="forms"><div class="ft">Форми з артиклем</div><div class="fg">
+      ${cell('однина', v.es)}${cell('множина', v.pl || '—')}
+      ${cell('неозначений', v.un)}${cell('неозначений, мн.', v.unos || '—')}</div></div>`;
+  }
+  const c = conjugate(v.es, v.fl);
+  return `<div class="forms"><div class="ft">Теперішній час · presente</div><div class="fg">
+    ${[0, 3, 1, 4, 2, 5].map(k => cell(PRONOUNS[k], c.p[k])).join('')}</div></div>`;
+}
 function renderMC(task) {
   const v = LIST()[task.i];
   let options = shuffle([v.ua, ...distractors(task.i)]);
@@ -860,8 +913,12 @@ function renderMC(task) {
       locked = true;
       const choice = options[+b.dataset.k];
       if (choice === v.ua) {
-        b.classList.add('ok'); speak(v.es);
-        setTimeout(next, 750);
+        b.classList.add('ok'); soundOk(); speak(v.es);
+        setTimeout(() => {
+          box.innerHTML = `<button class="opt ok" disabled>${esc(v.ua)}</button>${formsHtml(v)}<button class="cta" id="next-btn">Далі →</button>`;
+          const nb = document.getElementById('next-btn');
+          nb.onclick = next; nb.focus();
+        }, 350);
       } else {
         b.classList.add('bad'); buzz();
         setTimeout(() => { options = shuffle(options); locked = false; draw(); }, 800);
@@ -917,7 +974,7 @@ function renderType(task) {
     if (locked || !inp.value.trim()) return;
     const given = norm(inp.value);
     if (accepted.includes(given)) {
-      locked = true; inp.classList.add('ok'); speak(given);
+      locked = true; inp.classList.add('ok'); soundOk(); speak(given);
       setTimeout(next, 800);
     } else {
       fails++; buzz();
@@ -938,6 +995,7 @@ async function finishLesson() {
   const wasLesson = lesson.commit, pr = P();
   let learnedNow = 0;
   const before = pr.learned;
+  soundFanfare();
   if (wasLesson) {
     clearLesson();
     learnedNow = lesson.end - pr.learned;
