@@ -771,7 +771,7 @@ function renderHome() {
       doneToday ? `<div class="panel done-note"><b>Урок на сьогодні пройдено ✓</b><br><span class="sub">Завтра — нові ${PER_DAY} ${M().many} і повторення.</span></div>` : ''}
     <div style="display:grid;gap:8px">
       ${saved ? `<button class="cta" id="resume">Продовжити урок · ${savedDone}/${savedTotal}</button>
-        <div class="cue" style="text-align:center">Урок зараховується, коли пройдено і нові слова, і повторення всіх вивчених. <button class="linkish" id="restart">Почати спочатку</button></div>` :
+        <div class="cue" style="text-align:center">${saved.committed ? 'Нові слова вже збережено. Залишилось повторення.' : 'Нові слова збережуться, щойно пройдеш їх; потім — повторення.'} <button class="linkish" id="restart">Почати спочатку</button></div>` :
         !doneToday && !finished ? `<button class="cta" id="start">Почати урок · ${PER_DAY} нових ${M().many}${pr.learned ? ` + повторення ${pr.learned - reviewFrom(pr.learned)}` : ''}</button>` : ''}
       <div class="row">
         ${pr.learned ? `<button class="cta ghost" id="review">Повторити все (${pr.learned})</button>` : ''}
@@ -940,8 +940,18 @@ function loadLesson() {
   try {
     const l = JSON.parse(localStorage.getItem(lessonKey()));
     // v2: lighter lessons after word 100 — an unfinished lesson saved by an older version is rebuilt.
-    return l && l.v === 2 && l.mode === mode && l.start === P().learned && l.stages && l.s < l.stages.length ? l : null;
+    return l && l.v === 2 && l.mode === mode && (l.committed ? l.end : l.start) === P().learned && l.stages && l.s < l.stages.length ? l : null;
   } catch (e) { return null; }
+}
+// The new words count as learned once their own tasks are done, so closing the app during the review
+// never brings the same words back as "new"; the review itself stays saved and can be resumed.
+function commitNewWords() {
+  if (!lesson.commit || lesson.committed) return;
+  const pr = P();
+  if (pr.learned === lesson.start) pr.learned = lesson.end;
+  if (pr.lastDate !== today()) { pr.days++; pr.lastDate = today(); }
+  lesson.committed = true;
+  save();
 }
 function startReview() {
   const all = []; for (let i = 0; i < P().learned; i++) all.push(i);
@@ -967,6 +977,7 @@ function next() {
     lesson.s++; lesson.t = 0;
     // The day's new words are done once the lesson reaches the review of earlier words.
     if (lesson.commit && lesson.stages[lesson.s] && lesson.stages[lesson.s].review) {
+      commitNewWords();
       soundFanfare();
       lesson.toast = `🎉 ${lesson.end - lesson.start} нових слів пройдено! Тепер повторення.`;
     }
@@ -1099,13 +1110,12 @@ function renderType(task) {
 async function finishLesson() {
   const wasLesson = lesson.commit, pr = P();
   let learnedNow = 0;
-  const before = pr.learned;
+  const before = lesson.commit ? lesson.start : pr.learned;
   soundFanfare();
   if (wasLesson) {
     clearLesson();
-    learnedNow = lesson.end - pr.learned;
-    pr.learned = lesson.end;
-    if (pr.lastDate !== today()) { pr.days++; pr.lastDate = today(); }
+    commitNewWords();
+    learnedNow = lesson.end - lesson.start;
     await save();
   }
   const reviewed = lesson.stages.reduce((n, s) => n + s.tasks.length, 0);
