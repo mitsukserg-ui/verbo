@@ -772,13 +772,13 @@ function renderHome() {
     <div style="display:grid;gap:8px">
       ${saved ? `<button class="cta" id="resume">Продовжити урок · ${savedDone}/${savedTotal}</button>
         <div class="cue" style="text-align:center">Урок зараховується, коли пройдено і нові слова, і повторення всіх вивчених. <button class="linkish" id="restart">Почати спочатку</button></div>` :
-        !doneToday && !finished ? `<button class="cta" id="start">Почати урок · ${PER_DAY} нових ${M().many}${pr.learned ? ` + повторення ${pr.learned}` : ''}</button>` : ''}
+        !doneToday && !finished ? `<button class="cta" id="start">Почати урок · ${PER_DAY} нових ${M().many}${pr.learned ? ` + повторення ${pr.learned - reviewFrom(pr.learned)}` : ''}</button>` : ''}
       <div class="row">
         ${pr.learned ? `<button class="cta ghost" id="review">Повторити все (${pr.learned})</button>` : ''}
         ${doneToday && !finished && !saved ? `<button class="cta ghost" id="extra">Ще ${PER_DAY} нових слів</button>` : ''}
       </div>
       <label class="toggle"><input type="checkbox" id="sound" ${state.sound !== false ? 'checked' : ''}><span>Звукові сигнали (на iPhone чути, коли вимкнено беззвучний режим)</span></label>
-      ${mode === 'verbs' && openNow.length > 1 ? `<label class="toggle"><input type="checkbox" id="full" ${state.full ? 'checked' : ''}><span>Усі особи в кожному відкритому часі. Без цього новий час — усі особи, а попередні — по одній випадковій особі.</span></label>` : ''}
+      ${mode === 'verbs' && openNow.length ? `<label class="toggle"><input type="checkbox" id="full" ${state.full ? 'checked' : ''}><span>Повна практика відмінювання: усі нові слова в усіх особах і повтор попередніх часів. Без цього — 2–3 випадкові слова, по 2 випадкові особи.</span></label>` : ''}
     </div>
     ${pr.learned ? `<h2 style="margin:8px 0 0;font-size:20px">Мій словник · ${M().label.toLowerCase()}</h2><div class="dict" id="dict"></div>` : ''}
     ${STANDALONE ? backupPanel() : ''}
@@ -874,9 +874,21 @@ function renderDict() {
 let lesson = null;
 
 function mcTask(i) { return { type: 'mc', i }; }
+// After word 100 a lesson stays light: 2–3 random new words, each written for 2 random persons.
+const somePicks = list => shuffle(list).slice(0, Math.min(list.length, 2 + Math.floor(Math.random() * 2)));
 function verbStages(newIdx) {
+  if (!state.full) {
+    const words = somePicks(newIdx.filter(i => tensesFor(i).length));
+    const tasks = words.flatMap(i => {
+      const open = tensesFor(i), t = open[open.length - 1];
+      return shuffle(persons(t.k)).slice(0, 2).map(k => ({ type: 'conj', i, k, tense: t.k }));
+    });
+    if (!tasks.length) return [];
+    const ts = [...new Set(tasks.map(x => x.tense))].map(k => TENSES.find(t => t.k === k));
+    return [{ name: ts.length === 1 ? `${ts[0].ua} · ${ts[0].es}` : 'Відмінювання', tasks: shuffle(tasks) }];
+  }
   const stages = [];
-  // Newest tense first with every person, then a recap of the older tenses.
+  // Full practice: newest tense first with every person, then a recap of the older tenses.
   const byTense = new Map();
   for (const i of newIdx) {
     const open = tensesFor(i);
@@ -895,10 +907,10 @@ function verbStages(newIdx) {
 }
 function nounStages(newIdx) {
   const stages = [];
-  const pl = newIdx.filter(i => i >= 100 && NOUNS[i].pl);
-  if (pl.length) stages.push({ name: 'Множина з артиклем · los / las', tasks: shuffle(pl).map(i => ({ type: 'form', i, f: 'pl' })) });
-  const un = newIdx.filter(i => i >= 200);
-  if (un.length) stages.push({ name: 'Неозначений артикль · un / una', tasks: shuffle(un.flatMap(i => NOUNS[i].unos ? [{ type: 'form', i, f: 'un' }, { type: 'form', i, f: 'unos' }] : [{ type: 'form', i, f: 'un' }])) });
+  const pl = somePicks(newIdx.filter(i => i >= 100 && NOUNS[i].pl));
+  if (pl.length) stages.push({ name: 'Множина з артиклем · los / las', tasks: pl.map(i => ({ type: 'form', i, f: 'pl' })) });
+  const un = somePicks(newIdx.filter(i => i >= 200));
+  if (un.length) stages.push({ name: 'Неозначений артикль · un / una', tasks: un.map(i => ({ type: 'form', i, f: NOUNS[i].unos && Math.random() < 0.5 ? 'unos' : 'un' })) });
   return stages;
 }
 // Every lesson (the daily one and any extra one) ends with all earlier words as multiple choice.
@@ -910,11 +922,14 @@ function buildLesson() {
   stages.push({ name: mode === 'verbs' ? 'Напиши іспанською' : 'Напиши іспанською з артиклем', tasks: shuffle(newIdx).map(i => ({ type: 'spell', i })) });
   stages.push(...(mode === 'verbs' ? verbStages(newIdx) : nounStages(newIdx)));
   if (start > 0) {
-    const old = []; for (let i = 0; i < start; i++) old.push(i);
-    stages.push({ name: `Повторення всіх вивчених слів (${start})`, review: true, tasks: shuffle(old).map(mcTask) });
+    const from = reviewFrom(start), old = []; for (let i = from; i < start; i++) old.push(i);
+    stages.push({ name: from ? `Повторення останніх ${old.length} слів` : `Повторення всіх вивчених слів (${start})`, review: true, tasks: shuffle(old).map(mcTask) });
   }
-  return { stages, newIdx, start, end, commit: true, mode };
+  return { stages, newIdx, start, end, commit: true, mode, v: 2 };
 }
+// Up to word 100 every lesson repeats all learned words; after that only the last 20.
+const REVIEW_LAST = 20;
+const reviewFrom = start => start >= 100 ? start - REVIEW_LAST : 0;
 function startLesson() { lesson = buildLesson(); lesson.s = 0; lesson.t = 0; saveLesson(); renderTask(); }
 
 // The lesson in progress is kept per profile and section, so closing the app mid-review loses nothing.
@@ -924,7 +939,8 @@ function clearLesson() { try { localStorage.removeItem(lessonKey()); } catch (e)
 function loadLesson() {
   try {
     const l = JSON.parse(localStorage.getItem(lessonKey()));
-    return l && l.mode === mode && l.start === P().learned && l.stages && l.s < l.stages.length ? l : null;
+    // v2: lighter lessons after word 100 — an unfinished lesson saved by an older version is rebuilt.
+    return l && l.v === 2 && l.mode === mode && l.start === P().learned && l.stages && l.s < l.stages.length ? l : null;
   } catch (e) { return null; }
 }
 function startReview() {
