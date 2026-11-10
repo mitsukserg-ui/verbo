@@ -778,7 +778,6 @@ function renderHome() {
         ${doneToday && !finished && !saved ? `<button class="cta ghost" id="extra">Ще ${PER_DAY} нових слів</button>` : ''}
       </div>
       <label class="toggle"><input type="checkbox" id="sound" ${state.sound !== false ? 'checked' : ''}><span>Звукові сигнали (на iPhone чути, коли вимкнено беззвучний режим)</span></label>
-      ${mode === 'verbs' && openNow.length ? `<label class="toggle"><input type="checkbox" id="full" ${state.full ? 'checked' : ''}><span>Повна практика відмінювання: усі нові слова в усіх особах і повтор попередніх часів. Без цього — 2–3 випадкові слова, по 2 випадкові особи.</span></label>` : ''}
     </div>
     ${pr.learned ? `<h2 style="margin:8px 0 0;font-size:20px">Мій словник · ${M().label.toLowerCase()}</h2><div class="dict" id="dict"></div>` : ''}
     ${STANDALONE ? backupPanel() : ''}
@@ -876,34 +875,23 @@ let lesson = null;
 function mcTask(i) { return { type: 'mc', i }; }
 // After word 100 a lesson stays light: 2–3 random new words, each written for 2 random persons.
 const somePicks = list => shuffle(list).slice(0, Math.min(list.length, 2 + Math.floor(Math.random() * 2)));
+// Conjugation per lesson: 2 random persons in the present of a random new verb, then 2 random persons in one
+// other random open tense. After the last form of a pair the whole conjugation is shown, not typed.
 function verbStages(newIdx) {
-  if (!state.full) {
-    const words = somePicks(newIdx.filter(i => tensesFor(i).length));
-    const tasks = words.flatMap(i => {
-      const open = tensesFor(i), t = open[open.length - 1];
-      return shuffle(persons(t.k)).slice(0, 2).map(k => ({ type: 'conj', i, k, tense: t.k }));
-    });
-    if (!tasks.length) return [];
-    const ts = [...new Set(tasks.map(x => x.tense))].map(k => TENSES.find(t => t.k === k));
-    return [{ name: ts.length === 1 ? `${ts[0].ua} · ${ts[0].es}` : 'Відмінювання', tasks: shuffle(tasks) }];
-  }
-  const stages = [];
-  // Full practice: newest tense first with every person, then a recap of the older tenses.
-  const byTense = new Map();
-  for (const i of newIdx) {
-    const open = tensesFor(i);
-    if (!open.length) continue;
-    const newest = unlockAt(TENSES.indexOf(open[open.length - 1]));
-    for (const t of open) {
-      const isNew = unlockAt(TENSES.indexOf(t)) === newest;
-      const ks = isNew || state.full ? persons(t.k) : [pick(persons(t.k))];
-      if (!byTense.has(t.k)) byTense.set(t.k, { t, isNew, tasks: [] });
-      byTense.get(t.k).tasks.push(...ks.map(k => ({ type: 'conj', i, k, tense: t.k })));
-    }
-  }
-  const groups = [...byTense.values()].sort((a, b) => (b.isNew - a.isNew) || (TENSES.indexOf(a.t) - TENSES.indexOf(b.t)));
-  for (const g of groups) stages.push({ name: `${g.isNew ? '' : 'Повтор · '}${g.t.ua} · ${g.t.es}`, tasks: g.tasks });
+  const words = newIdx.filter(i => tensesFor(i).length);
+  if (!words.length) return [];
+  const pair = (i, tk, show) => shuffle(persons(tk)).slice(0, 2).map((k, n) => ({ type: 'conj', i, k, tense: tk, show: n === 1 ? show : '' }));
+  const stages = [{ name: 'Теперішній час · presente', tasks: pair(pick(words), 'p', 'p') }];
+  const w = pick(words), others = tensesFor(w).filter(t => t.k !== 'p');
+  if (others.length) { const t = pick(others); stages.push({ name: `${t.ua} · ${t.es}`, tasks: pair(w, t.k, 'all') }); }
   return stages;
+}
+// Conjugation tables of a verb: one tense ('p') or every tense open at that word ('all').
+function conjTablesHtml(i, which) {
+  const v = VERBS[i], c = conjugate(v.es, v.fl);
+  const ts = which === 'all' ? tensesFor(i) : TENSES.filter(t => t.k === which);
+  return ts.map(t => `<div class="forms"><div class="ft">${t.ua} · ${t.es}</div><div class="fg">
+    ${[0, 3, 1, 4, 2, 5].filter(k => persons(t.k).includes(k)).map(k => `<div class="fc"><span>${pronLabel(t.k, k)}</span><b>${esc(show(c[t.k][k]))}</b></div>`).join('')}</div></div>`).join('');
 }
 function nounStages(newIdx) {
   const stages = [];
@@ -925,7 +913,7 @@ function buildLesson() {
     const from = reviewFrom(start), old = []; for (let i = from; i < start; i++) old.push(i);
     stages.push({ name: from ? `Повторення останніх ${old.length} слів` : `Повторення всіх вивчених слів (${start})`, review: true, tasks: shuffle(old).map(mcTask) });
   }
-  return { stages, newIdx, start, end, commit: true, mode, v: 2 };
+  return { stages, newIdx, start, end, commit: true, mode, v: 3 };
 }
 // Up to word 100 every lesson repeats all learned words; after that only the last 20.
 const REVIEW_LAST = 20;
@@ -940,7 +928,7 @@ function loadLesson() {
   try {
     const l = JSON.parse(localStorage.getItem(lessonKey()));
     // v2: lighter lessons after word 100 — an unfinished lesson saved by an older version is rebuilt.
-    return l && l.v === 2 && l.mode === mode && (l.committed ? l.end : l.start) === P().learned && l.stages && l.s < l.stages.length ? l : null;
+    return l && l.v === 3 && l.mode === mode && (l.committed ? l.end : l.start) === P().learned && l.stages && l.s < l.stages.length ? l : null;
   } catch (e) { return null; }
 }
 // The new words count as learned once their own tasks are done, so closing the app during the review
@@ -1091,7 +1079,13 @@ function renderType(task) {
     const given = norm(inp.value);
     if (accepted.includes(given)) {
       locked = true; inp.classList.add('ok'); soundOk(); speak(given);
-      setTimeout(next, 800);
+      if (task.type === 'conj' && task.show) {
+        setTimeout(() => {
+          document.getElementById('f').outerHTML = `<div class="ex-hint" style="margin-top:4px">Усі форми <b class="es">${esc(v.es)}</b> — просто переглянь:</div>
+            ${conjTablesHtml(task.i, task.show)}<button class="cta" id="next-btn">Далі →</button>`;
+          const nb = document.getElementById('next-btn'); nb.onclick = next; nb.focus();
+        }, 500);
+      } else setTimeout(next, 800);
     } else {
       fails++; buzz();
       inp.classList.remove('shake'); void inp.offsetWidth; inp.classList.add('bad', 'shake');
